@@ -1,0 +1,6 @@
+C:\Users\Vlado\Desktop\PRMuIS\Projekat\Parking.Biblioteka\bin\Debug\Parking.Biblioteka.dll
+C:\Users\Vlado\Desktop\PRMuIS\Projekat\Parking.Biblioteka\bin\Debug\Parking.Biblioteka.pdb
+C:\Users\Vlado\Desktop\PRMuIS\Projekat\Parking.Biblioteka\obj\Debug\Parking.Biblioteka.csproj.AssemblyReference.cache
+C:\Users\Vlado\Desktop\PRMuIS\Projekat\Parking.Biblioteka\obj\Debug\Parking.Biblioteka.csproj.CoreCompileInputs.cache
+C:\Users\Vlado\Desktop\PRMuIS\Projekat\Parking.Biblioteka\obj\Debug\Parking.Biblioteka.dll
+C:\Users\Vlado\Desktop\PRMuIS\Projekat\Parking.Biblioteka\obj\Debug\Parking.Biblioteka.pdb

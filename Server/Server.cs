@@ -2,8 +2,10 @@
 using Server;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.Serialization.Formatters.Binary;
 using System.Text;
 
 namespace ParkingServer
@@ -18,7 +20,9 @@ namespace ParkingServer
             List<ParkingInfo> parkinzi = UnosParkinga();
 
             Dictionary<int, ZahtevInfo> zahtevi = new Dictionary<int, ZahtevInfo>();
-          
+
+            int requestBroj = new Random().Next(10000, 99999);
+
 
             Socket udpSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             udpSocket.Bind(new IPEndPoint(IPAddress.Any, UDP_PORT));
@@ -78,12 +82,51 @@ namespace ParkingServer
                         {
                             Socket s = checkRead[i];
 
-                            // UDP prijava
                             if (s == udpSocket)
                             {
                                 UdpPrijava(udpSocket);
                                 continue;
                             }
+
+                            if (s == tcpServer)
+                            {
+                                Socket c = tcpServer.Accept();
+                                c.Blocking = false;
+                                clients.Add(c);
+
+                                Console.WriteLine("[TCP] Povezan klijent: " + IspisKlijenta(c));
+
+                                PosaljiPaket(c, new Paket("STANJE", parkinzi));
+                                continue;
+                            }
+
+                            // TCP receive
+                            int bytes = 0;
+                            try
+                            {
+                                bytes = s.Receive(buffer);
+                            }
+                            catch (SocketException)
+                            {
+                                // non-blocking, ignore
+                                continue;
+                            }
+
+                            if (bytes <= 0)
+                            {
+                                Console.WriteLine("[TCP] Diskonektovan: " + IspisKlijenta(s));
+                                UkloniKlijenta(s, clients, zahtevi);
+                                continue;
+                            }
+
+                            Paket p = DeserializePaket(buffer, bytes);
+                            if (p == null)
+                            {
+                                PosaljiPaket(s, new Paket("GRESKA", "Neispravna poruka"));
+                                continue;
+                            }
+
+                            ObradiTcpZahtev(s, p, parkinzi, clients, zahtevi, ref requestBroj);
                         }
                     }
                         if (Console.KeyAvailable)
@@ -123,7 +166,7 @@ namespace ParkingServer
             } 
             catch { }
 
-            Console.WriteLine("Server zavrsio.");
+            Console.WriteLine("Server zavrsava...");
             Console.ReadKey();
         }
 
@@ -143,6 +186,146 @@ namespace ParkingServer
             }
         }
 
+        static void ObradiTcpZahtev(
+            Socket client,
+            Paket paket,
+            List<ParkingInfo> parkinzi,
+            List<Socket> clients,
+            Dictionary<int, ZahtevInfo> zahtevi,
+            ref int requestSeed)
+        {
+            if (paket.Tip == "ZAUZMI")
+            {
+                Zauzece z = paket.Podaci as Zauzece;
+                if (z == null)
+                {
+                    PosaljiPaket(client, new Paket("GRESKA", "Neispravan ZAUZMI"));
+                    return;
+                }
+
+                ParkingInfo p = NadjiParking(parkinzi, z.BrojParkinga);
+                if (p == null)
+                {
+                    PosaljiPaket(client, new Paket("GRESKA", "Nevalidan parking"));
+                    return;
+                }
+
+                if (z.BrojMesta <= 0)
+                {
+                    PosaljiPaket(client, new Paket("GRESKA", "Broj mesta mora biti > 0"));
+                    return;
+                }
+
+                if (z.BrojMesta == 1)
+                {
+                    if (DaLiJePrazno(z.Proizvodjac) || DaLiJePrazno(z.Model) || DaLiJePrazno(z.Boja) || DaLiJePrazno(z.Registracija))
+                    {
+                        PosaljiPaket(client, new Paket("GRESKA", "Za 1 mesto posalji i podatke o autu"));
+                        return;
+                    }
+                }
+
+                int slobodno = p.Ukupno - p.Zauzeto;
+                int stvarno = z.BrojMesta;
+                if (stvarno > slobodno) stvarno = slobodno;
+
+                if (stvarno <= 0)
+                {
+                    PosaljiPaket(client, new Paket("OBAVESTENJE", "Nema slobodnih mesta"));
+                    return;
+                }
+
+                z.BrojMesta = stvarno;
+                p.Zauzeto += stvarno;
+
+                requestSeed++;
+                int reqId = requestSeed;
+
+                ZahtevInfo info = new ZahtevInfo();
+                info.ZahtevId = reqId;
+                info.Zauzece = z;
+                info.Start = DateTime.Now;
+                info.Owner = client; 
+
+                zahtevi[reqId] = info;
+
+                Console.WriteLine("[ZAUZMI] ReqID=" + reqId + " Parking=" + p.Id +
+                                  " Zauzeto Mesta=" + stvarno + " -> " + p.Zauzeto + "/" + p.Ukupno);
+
+                Potvrda potv = new Potvrda();
+                potv.RequestId = reqId;
+                potv.StvarnoZauzeto = stvarno;
+                potv.poruka = "OK";
+
+                PosaljiPaket(client, new Paket("Potvrda", potv));
+
+                PosaljiStanje(clients, parkinzi);
+
+                return;
+            }
+
+            if (paket.Tip == "OSLOBADJAM")
+            {
+                string tekst = paket.Podaci as string;
+                if (tekst == null || !tekst.StartsWith("Oslobadjam:"))
+                {
+                    PosaljiPaket(client, new Paket("GRESKA", "Neispravan format oslobadjanja"));
+                    return;
+                }
+
+                int reqId;
+                if (!IzvuciRequestId(tekst, out reqId))
+                {
+                    PosaljiPaket(client, new Paket("GRESKA", "Neispravan RequestId"));
+                    return;
+                }
+
+                if (!zahtevi.ContainsKey(reqId))
+                {
+                    PosaljiPaket(client, new Paket("GRESKA", "Nepostojeci zahtev"));
+                    return;
+                }
+
+                ZahtevInfo info = zahtevi[reqId];
+
+                if (info.Owner != client)
+                {
+                    PosaljiPaket(client, new Paket("GRESKA", "Nemate pravo da oslobodite ovaj zahtev"));
+                    return;
+                }
+
+                ParkingInfo p =NadjiParking(parkinzi, info.Zauzece.BrojParkinga);
+                if (p == null)
+                {
+                    PosaljiPaket(client, new Paket("GRESKA", "Parking ne postoji"));
+                    return;
+                }
+
+                p.Zauzeto -= info.Zauzece.BrojMesta;
+                if (p.Zauzeto < 0) p.Zauzeto = 0;
+
+                double mins = (DateTime.Now - info.Start).TotalMinutes;
+                int sati = (int)Math.Ceiling(mins);
+                if (sati < 1) sati = 1;
+
+                int iznos = sati * info.Zauzece.BrojMesta * p.CenaPoSatu;
+
+                zahtevi.Remove(reqId);
+
+                Console.WriteLine("[OSLOBODI] Req=" + reqId + " Parking=" + p.Id +
+                                  " -> " + p.Zauzeto + "/" + p.Ukupno + ", Vas Racun iznosi=" + iznos);
+
+                PosaljiStanje(clients, parkinzi);
+
+                Racun r = new Racun();
+                r.RequestId = reqId;
+                r.Iznos = iznos;
+
+                PosaljiPaket(client, new Paket("RACUN", r));
+                return;
+            }
+        }
+
         static List<ParkingInfo> UnosParkinga()
         {
             List<ParkingInfo> list = new List<ParkingInfo>();
@@ -152,7 +335,7 @@ namespace ParkingServer
 
             for (int i = 1; i <= n; i++)
             {
-                Console.WriteLine("--- Parking " + " ---");
+                Console.WriteLine("--- Parking ---");
                 Console.WriteLine("Ukupno mesta:");
                 int ukupno = Convert.ToInt32(Console.ReadLine());
 
@@ -183,7 +366,6 @@ namespace ParkingServer
 
         static void UkloniKlijenta(Socket c, List<Socket> clients, Dictionary<int, ZahtevInfo> zahtevi)
         {
-            // brise zahteve od klijenta
             List<int> ukloni = new List<int>();
             foreach (KeyValuePair<int, ZahtevInfo> kv in zahtevi)
             {
@@ -210,6 +392,77 @@ namespace ParkingServer
             {
                 return "Nepoznato"; 
             }
+        }
+
+        static void PosaljiPaket(Socket s, Paket paket)
+        {
+            byte[] data;
+            using (MemoryStream ms = new MemoryStream())
+            {
+                BinaryFormatter bf = new BinaryFormatter();
+                bf.Serialize(ms, paket);
+                data = ms.ToArray();
+            }
+            s.Send(data);
+        }
+
+        static Paket DeserializePaket(byte[] buffer, int count)
+        {
+            try
+            {
+                using (MemoryStream ms = new MemoryStream(buffer, 0, count))
+                {
+                    BinaryFormatter bf = new BinaryFormatter();
+                    return bf.Deserialize(ms) as Paket;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        static ParkingInfo NadjiParking(List<ParkingInfo> parkinzi, int id)
+        {
+            for (int i = 0; i < parkinzi.Count; i++)
+            {
+                if (parkinzi[i].Id == id)
+                    return parkinzi[i];
+            }
+            return null;
+        }
+
+        static bool IzvuciRequestId(string tekst, out int reqId)
+        {
+            reqId = 0;
+            int idx = tekst.IndexOf(':');
+            if (idx < 0) return false;
+
+            string part = tekst.Substring(idx + 1).Trim();
+            return int.TryParse(part, out reqId);
+        }
+
+        static void PosaljiStanje(List<Socket> clients, List<ParkingInfo> parkinzi)
+        {
+            Paket state = new Paket("STANJE", parkinzi);
+
+            // Kopija liste da ne puca ako neko ispadne
+            Socket[] niz = clients.ToArray();
+            for (int i = 0; i < niz.Length; i++)
+            {
+                try
+                {
+                    PosaljiPaket(niz[i], state);
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        static bool DaLiJePrazno(string s)
+        {
+            return s == null || s.Trim().Length == 0;
         }
     }
 }

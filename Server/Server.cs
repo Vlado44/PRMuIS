@@ -146,6 +146,13 @@ namespace ParkingServer
                 Console.WriteLine($"Greska: {ex.Message}");
             }
 
+            Console.WriteLine("\n--- STATISTIKA (max vozila u 1h) ---");
+            for (int i = 0; i < parkinzi.Count; i++)
+            {
+                int max = MaxUJednomSatu(parkinzi[i].Dolasci);
+                Console.WriteLine("Parking " + parkinzi[i].Id + ": max u 1h = " + max);
+            }
+
             for (int i = 0; i < clients.Count; i++)
             {
                 try 
@@ -313,7 +320,7 @@ namespace ParkingServer
                 zahtevi.Remove(reqId);
 
                 Console.WriteLine("[OSLOBODI] Req=" + reqId + " Parking=" + p.Id +
-                                  " -> " + p.Zauzeto + "/" + p.Ukupno + ", Vas Racun iznosi=" + iznos);
+                                  " -> " + p.Zauzeto + "/" + p.Ukupno + ", racun=" + iznos);
 
                 PosaljiStanje(clients, parkinzi);
 
@@ -335,7 +342,7 @@ namespace ParkingServer
 
             for (int i = 1; i <= n; i++)
             {
-                Console.WriteLine("--- Parking ---");
+                Console.WriteLine("--- Parking " + i + " ---");
                 Console.WriteLine("Ukupno mesta:");
                 int ukupno = Convert.ToInt32(Console.ReadLine());
 
@@ -396,14 +403,21 @@ namespace ParkingServer
 
         static void PosaljiPaket(Socket s, Paket paket)
         {
-            byte[] data;
-            using (MemoryStream ms = new MemoryStream())
+            try
             {
-                BinaryFormatter bf = new BinaryFormatter();
-                bf.Serialize(ms, paket);
-                data = ms.ToArray();
+                byte[] data;
+                using (MemoryStream ms = new MemoryStream())
+                {
+                    BinaryFormatter bf = new BinaryFormatter();
+                    bf.Serialize(ms, paket);
+                    data = ms.ToArray();
+                }
+                s.Send(data);
             }
-            s.Send(data);
+            catch (SocketException)
+            {
+
+            }
         }
 
         static Paket DeserializePaket(byte[] buffer, int count)
@@ -445,8 +459,6 @@ namespace ParkingServer
         static void PosaljiStanje(List<Socket> clients, List<ParkingInfo> parkinzi)
         {
             Paket state = new Paket("STANJE", parkinzi);
-
-            // Kopija liste da ne puca ako neko ispadne
             Socket[] niz = clients.ToArray();
             for (int i = 0; i < niz.Length; i++)
             {
@@ -463,6 +475,27 @@ namespace ParkingServer
         static bool DaLiJePrazno(string s)
         {
             return s == null || s.Trim().Length == 0;
+        }
+
+        static int MaxUJednomSatu(List<DateTime> times)
+        {
+            if (times == null || times.Count == 0) return 0;
+
+            times.Sort();
+
+            int i = 0;
+            int max = 1;
+
+            for (int j = 0; j < times.Count; j++)
+            {
+                while (times[j] - times[i] > TimeSpan.FromMinutes(60))
+                    i++;
+
+                int cnt = j - i + 1;
+                if (cnt > max) max = cnt;
+            }
+
+            return max;
         }
     }
 }
